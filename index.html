@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VirtualList —— 原生 JS 不等高虚拟滚动演示</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    background: #f0f2f5;
+    color: #333;
+    padding: 20px;
+  }
+  h1 { font-size: 20px; margin-bottom: 12px; }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .toolbar button, .toolbar input {
+    padding: 6px 12px;
+    border: 1px solid #c9cdd4;
+    border-radius: 6px;
+    background: #fff;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .toolbar input { width: 100px; cursor: text; }
+  .toolbar button:hover { background: #f5f7fa; }
+  .toolbar label { font-size: 13px; display: flex; align-items: center; gap: 4px; }
+
+  #debug-panel {
+    display: none;
+    font-family: Menlo, Consolas, monospace;
+    font-size: 12px;
+    background: #1e1e2e;
+    color: #a6e3a1;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+  }
+  body.debug #debug-panel { display: block; }
+  /* 调试模式:给真实渲染的节点描边,直观看到哪些 DOM 是真实存在的 */
+  body.debug .virtual-list-item { outline: 1px dashed #e64545; outline-offset: -1px; }
+  body.debug .virtual-list-phantom { outline: 2px solid #4a90d9; }
+
+  #list-container {
+    height: 600px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #d9dce1;
+    border-radius: 8px;
+    position: relative;
+  }
+  .virtual-list-item {
+    padding: 10px 14px;
+    border-bottom: 1px solid #eef0f3;
+    background: #fff;
+  }
+  .item-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #9099a5;
+    margin-bottom: 4px;
+  }
+  .item-header .idx { font-weight: 600; color: #4a90d9; }
+  .item-text { font-size: 14px; line-height: 1.6; }
+  .item-img {
+    border-radius: 6px;
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,.85);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+  <h1>VirtualList 演示 —— 5000 条不等高条目(原生 JS,无框架)</h1>
+
+  <div class="toolbar">
+    <label><input type="checkbox" id="debug-toggle"> 调试模式</label>
+    <input type="number" id="jump-input" placeholder="条目索引" min="0" max="4999">
+    <button id="jump-btn">跳转</button>
+    <button id="top-btn">回顶部</button>
+    <button id="bottom-btn">到底部</button>
+    <button id="mutate-btn">随机改变 50 个条目高度</button>
+  </div>
+
+  <div id="debug-panel"></div>
+  <div id="list-container"></div>
+
+  <script src="virtual-list.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    // ---------- 可复现的伪随机数据(固定种子) ----------
+    function mulberry32(seed) {
+      return function () {
+        seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+        var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    var rand = mulberry32(42);
+
+    var WORDS = ('虚拟滚动 高度测量 二分查找 节点复用 缓冲区 前缀和 偏移修正 ' +
+      '快速滚动 占位元素 对象池 视口 锚点 收敛 渲染 回收 原生实现').split(' ');
+    function randomText(lines) {
+      var out = [];
+      for (var l = 0; l < lines; l++) {
+        var n = 8 + Math.floor(rand() * 20);
+        var words = [];
+        for (var w = 0; w < n; w++) words.push(WORDS[Math.floor(rand() * WORDS.length)]);
+        out.push(words.join('，') + '。');
+      }
+      return out.join('');
+    }
+
+    var ITEM_COUNT = 5000;
+    var items = [];
+    for (var i = 0; i < ITEM_COUNT; i++) {
+      var r = rand();
+      var item = { id: i };
+      if (r < 0.3) {
+        // 带图片占位的条目:高度差异明显
+        item.type = 'image';
+        item.imgH = 80 + Math.floor(rand() * 220);
+        item.hue = Math.floor(rand() * 360);
+        item.text = randomText(1 + Math.floor(rand() * 2));
+      } else {
+        // 纯文本条目:1~6 行
+        item.type = 'text';
+        item.text = randomText(1 + Math.floor(rand() * 6));
+      }
+      items.push(item);
+    }
+
+    // ---------- 渲染函数:完整覆盖节点内容,保证复用无残留 ----------
+    function renderItem(node, item, index) {
+      var html = '<div class="item-header">' +
+        '<span class="idx">#' + index + '</span>' +
+        '<span>' + item.type + (item.type === 'image' ? ' · 图片高 ' + item.imgH + 'px' : '') + '</span>' +
+        '</div>' +
+        '<div class="item-text">' + item.text + '</div>';
+      if (item.type === 'image') {
+        html += '<div class="item-img" style="height:' + item.imgH + 'px;' +
+          'background:hsl(' + item.hue + ',60%,55%)">图片占位 ' + item.imgH + 'px</div>';
+      }
+      node.innerHTML = html;
+    }
+
+    // ---------- 调试面板 ----------
+    var debugPanel = document.getElementById('debug-panel');
+    function fmt(n) { return Math.round(n).toLocaleString(); }
+    function onUpdate(info) {
+      debugPanel.textContent =
+        '渲染区间: [' + info.startIndex + ', ' + info.endIndex + ']' +
+        '    真实 DOM 节点: ' + info.renderedNodes +
+        '    池中待复用: ' + info.pooledNodes + '\n' +
+        '占位总高度: ' + fmt(info.totalHeight) + 'px' +
+        '    已测量条目: ' + info.measuredCount + ' / ' + ITEM_COUNT + '\n' +
+        '估算误差(已测量条目): 平均 ' + info.avgError.toFixed(1) + 'px' +
+        '    最大 ' + fmt(info.maxError) + 'px';
+    }
+
+    var list = new VirtualList({
+      container: document.getElementById('list-container'),
+      items: items,
+      estimatedHeight: 60,
+      buffer: 300,
+      renderItem: renderItem,
+      onUpdate: onUpdate
+    });
+
+    // ---------- 工具栏 ----------
+    document.getElementById('debug-toggle').addEventListener('change', function (e) {
+      document.body.classList.toggle('debug', e.target.checked);
+    });
+    document.getElementById('jump-btn').addEventListener('click', function () {
+      var v = parseInt(document.getElementById('jump-input').value, 10);
+      if (!isNaN(v)) list.scrollToIndex(v);
+    });
+    document.getElementById('top-btn').addEventListener('click', function () {
+      list.scrollToIndex(0);
+    });
+    document.getElementById('bottom-btn').addEventListener('click', function () {
+      list.scrollToIndex(ITEM_COUNT - 1);
+    });
+    // 模拟内容变化导致的高度改变:组件应重新测量并修正累积偏移
+    document.getElementById('mutate-btn').addEventListener('click', function () {
+      for (var k = 0; k < 50; k++) {
+        var idx = Math.floor(Math.random() * ITEM_COUNT);
+        var it = items[idx];
+        if (it.type === 'image') it.imgH = 80 + Math.floor(Math.random() * 220);
+        else it.text = randomText(1 + Math.floor(Math.random() * 6));
+      }
+      list.refresh();
+    });
+  })();
+  </script>
+</body>
+</html>
