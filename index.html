@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>虚拟滚动列表 · 不等高条目（原生 JS）</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #e3e6ea;
+    --text: #1f2430;
+    --muted: #6b7280;
+    --accent: #3b82f6;
+    --accent-soft: #dbeafe;
+    --warn: #f59e0b;
+    --debug-bg: rgba(245, 158, 11, 0.06);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    background: var(--bg);
+  }
+  body { display: flex; flex-direction: column; }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 10px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .ctrl { display: flex; align-items: center; gap: 6px; }
+  button {
+    font: inherit;
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  .stat { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stat b { color: var(--text); font-weight: 600; }
+
+  #viewport {
+    flex: 1;
+    overflow-y: auto;
+    overflow-anchor: none;          /* 交给虚拟列表自己做滚动锚定 */
+    background: var(--bg);
+    position: relative;
+  }
+
+  /* ---- 虚拟列表内部结构 ---- */
+  .vl-sizer  { position: relative; }
+  .vl-window { position: relative; }
+  .vl-pad    { width: 100%; }
+
+  .vl-item {
+    display: flex;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .vl-item:nth-child(even) { background: #fbfcfe; }
+
+  .avatar {
+    flex: 0 0 auto;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .body { flex: 1; min-width: 0; }
+  .title { font-weight: 600; margin-bottom: 2px; }
+  .meta { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .text { color: #374151; word-break: break-word; white-space: pre-line; }
+  .thumb {
+    margin-top: 8px;
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,.92);
+    font-size: 12px;
+    letter-spacing: .5px;
+  }
+  .tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag {
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: #1d4ed8;
+  }
+
+  /* ---- 调试模式 ---- */
+  body.debug .vl-item {
+    outline: 1px dashed rgba(245, 158, 11, .8);
+    outline-offset: -1px;
+    background: var(--debug-bg) !important;
+  }
+  body.debug .vl-item::after {
+    content: "#" attr(data-index) "  h=" attr(data-h) "px  Δ=" attr(data-diff);
+    position: absolute;
+    top: 2px;
+    right: 8px;
+    font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #92400e;
+    background: rgba(255,255,255,.85);
+    border: 1px solid #fcd34d;
+    border-radius: 4px;
+    padding: 0 5px;
+    pointer-events: none;
+  }
+  .vl-item { position: relative; }
+  body.debug .vl-pad {
+    background:
+      repeating-linear-gradient(45deg, #eef2ff 0 10px, #e0e7ff 10px 20px);
+  }
+  body.debug .vl-pad::before {
+    content: attr(data-label);
+    display: block;
+    text-align: center;
+    font: 11px/2 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #4338ca;
+  }
+  #debugbar {
+    display: none;
+    padding: 6px 16px;
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #1f2430;
+    color: #a7f3d0;
+    white-space: pre-wrap;
+  }
+  body.debug #debugbar { display: block; }
+
+  #jump { width: 90px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>虚拟滚动 · 不等高 6000 条</h1>
+    <div class="ctrl">
+      <button id="toggle-debug">🐞 调试模式：关</button>
+    </div>
+    <div class="ctrl">
+      跳转到 <input id="jump" type="number" min="0" max="5999" placeholder="index">
+      <button id="go">Go</button>
+      <button id="bottom">滚到底部</button>
+      <button id="mutate">随机改 20 条内容</button>
+    </div>
+    <span class="stat" id="stat"></span>
+  </header>
+
+  <div id="viewport"></div>
+  <div id="debugbar"></div>
+
+  <script src="js/virtual-list.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    var COUNT = 6000;
+    var ESTIMATE = 90;
+    var COLORS = ['#ef4444','#f97316','#eab308','#22c55e','#06b6d4',
+                  '#3b82f6','#8b5cf6','#ec4899','#64748b'];
+    var SAMPLE = [
+      '短内容。',
+      '这是一条普通长度的动态，包含若干文字，用来制造中等高度。',
+      '这是一条比较长的动态。虚拟列表需要在真实高度未知时先用估算高度占位，' +
+      '渲染后测量实际高度并修正累积偏移表，保证滚动条总高度始终收敛到真实值，' +
+      '不会出现滚到底部还有大片空白的情况。',
+      '多行文本第一行\n第二行\n第三行\n第四行——换行会显著拉高条目高度。'
+    ];
+
+    // 可复现的伪随机（保证每次打开数据一致，便于对照）
+    function mulberry32(seed) {
+      return function () {
+        seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+        var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    var rnd = mulberry32(20261005);
+
+    // ---- 生成 6000 条高度差异明显的数据 ----
+    var data = new Array(COUNT);
+    for (var i = 0; i < COUNT; i++) {
+      var paragraphs = 1 + Math.floor(rnd() * 4);          // 1~4 段
+      var hasImage = rnd() < 0.45;                          // 近一半带图片占位
+      var imgW = 160 + Math.floor(rnd() * 260);             // 宽度不定
+      var imgH = hasImage ? 70 + Math.floor(rnd() * 180) : 0;
+      var tagCount = rnd() < 0.4 ? Math.floor(rnd() * 4) : 0;
+      var lines = [];
+      for (var p = 0; p < paragraphs; p++) {
+        lines.push(SAMPLE[Math.floor(rnd() * SAMPLE.length)]);
+      }
+      data[i] = {
+        id: i,
+        color: COLORS[i % COLORS.length],
+        initial: String.fromCharCode(65 + (i % 26)),
+        title: '条目 #' + i + ' · 用户' + Math.floor(rnd() * 9000),
+        time: (Math.floor(rnd() * 59) + 1) + ' 分钟前',
+        text: lines.join('\n\n'),
+        hasImage: hasImage,
+        imgW: imgW, imgH: imgH,
+        tags: tagCount ? new Array(tagCount).fill(0).map(function (_, k) {
+          return '标签' + ((i + k) % 17);
+        }) : null,
+        version: 0
+      };
+    }
+
+    var viewport = document.getElementById('viewport');
+
+    var list = new VirtualList(viewport, {
+      itemCount: COUNT,
+      estimatedHeight: ESTIMATE,
+      overscan: 6,
+      renderItem: function (index, el) {
+        var d = data[index];
+        var avatarH = 36 + (index % 5) * 4;
+        var html =
+          '<div class="avatar" style="width:' + avatarH + 'px;height:' + avatarH +
+            'px;background:' + d.color + '">' + d.initial + '</div>' +
+          '<div class="body">' +
+            '<div class="title"></div>' +
+            '<div class="meta"></div>' +
+            '<div class="text"></div>' +
+            (d.hasImage ? '<div class="thumb"></div>' : '') +
+            (d.tags ? '<div class="tags">' +
+              d.tags.map(function (t) { return '<span class="tag"></span>'; }).join('') +
+              '</div>' : '') +
+          '</div>';
+        el.innerHTML = html;
+
+        // 文本一律走 textContent，防止数据注入；同时验证“复用节点被整体重置”
+        el.querySelector('.title').textContent = d.title + (d.version ? ' (v' + d.version + ')' : '');
+        el.querySelector('.meta').textContent = d.time;
+        el.querySelector('.text').textContent = d.text;
+        if (d.hasImage) {
+          var thumb = el.querySelector('.thumb');
+          thumb.style.height = d.imgH + 'px';
+          thumb.style.background = d.color;
+          thumb.textContent = '图片占位 ' + d.imgW + '×' + d.imgH;
+        }
+        if (d.tags) {
+          var tagEls = el.querySelectorAll('.tag');
+          d.tags.forEach(function (t, k) { tagEls[k].textContent = t; });
+        }
+      }
+    });
+
+    // ---- 状态栏 ----
+    var statEl = document.getElementById('stat');
+    var debugbar = document.getElementById('debugbar');
+    list.onLayout = (function () {
+      var frames = 0, last = performance.now(), fps = 0;
+      return function (info) {
+        frames++;
+        var now = performance.now();
+        if (now - last >= 500) {
+          fps = Math.round(frames * 1000 / (now - last));
+          frames = 0; last = now;
+        }
+        statEl.innerHTML =
+          '可视 <b>[' + info.visibleStart + ' – ' + info.visibleEnd + ']</b>' +
+          ' · 渲染节点 <b>' + info.nodeCount + '</b>' +
+          ' · 累计创建 <b>' + info.nodesCreated + '</b>' +
+          ' · 已测量 <b>' + info.measuredCount + '/' + info.itemCount + '</b>' +
+          ' · 外推均值 <b>' + info.estimate.toFixed(1) + 'px</b>' +
+          ' · 总高 <b>' + Math.round(info.totalHeight) + 'px</b>' +
+          ' · scrollTop <b>' + Math.round(info.scrollTop) + '</b>' +
+          ' · ' + fps + ' fps';
+
+        if (document.body.classList.contains('debug')) {
+          debugbar.textContent =
+            '挂载区间 (含 overscan): [' + info.start + ' .. ' + info.end + ']\n' +
+            '纯可视区间:           [' + info.visibleStart + ' .. ' + info.visibleEnd + ']\n' +
+            '当前真实 DOM 节点数:  ' + info.nodeCount +
+            '（整个列表仅创建过 ' + info.nodesCreated + ' 个，其余全部复用）\n' +
+            '外推估算高度 E = 已测条目实测均值 = ' + info.estimate.toFixed(2) +
+            'px（初始估算 ' + ESTIMATE + 'px）；未渲染条目的位置/总高均按 E 无偏外推。\n' +
+            '条目标签 h= 为实测高度，Δ 为它与当前外推均值之差，? 表示尚未测量；\n' +
+            '斜纹区域为上下占位 div，只有高度、没有真实条目节点。';
+        }
+      };
+    })();
+
+    // ---- 控件 ----
+    var debugBtn = document.getElementById('toggle-debug');
+    debugBtn.addEventListener('click', function () {
+      var on = document.body.classList.toggle('debug');
+      debugBtn.textContent = '🐞 调试模式：' + (on ? '开' : '关');
+    });
+    // 支持 ?debug=1 直接进入调试模式
+    if (/[?&]debug=1\b/.test(location.search)) {
+      document.body.classList.add('debug');
+      debugBtn.textContent = '🐞 调试模式：开';
+    }
+    // 支持 ?goto=1234 直接跳转到指定条目（便于分享/截图）
+    var m = /[?&]goto=(\d+)\b/.exec(location.search);
+    if (m) {
+      document.getElementById('jump').value = m[1];
+      list.scrollToIndex(parseInt(m[1], 10));
+    }
+
+    document.getElementById('go').addEventListener('click', function () {
+      var input = document.getElementById('jump');
+      var i = parseInt(input.value, 10);
+      if (!isNaN(i)) list.scrollToIndex(i);
+    });
+    document.getElementById('bottom').addEventListener('click', function () {
+      list.scrollToIndex(COUNT - 1);
+    });
+    document.getElementById('mutate').addEventListener('click', function () {
+      // 修改随机 20 条的内容（可能正挂在屏幕上）-> 高度变化 -> 重新测量修正
+      for (var k = 0; k < 20; k++) {
+        var i = Math.floor(Math.random() * COUNT);
+        var d = data[i];
+        d.version++;
+        d.text += '\n新增的一段内容，高度应该增长并触发重新测量。#';
+      }
+      list.rerender();
+    });
+  })();
+  </script>
+</body>
+</html>

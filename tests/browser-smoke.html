@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<!--
+  真实浏览器冒烟测试（Chrome headless）：
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      --headless=new --disable-gpu --dump-dom \
+      file://$PWD/tests/browser-smoke.html | grep '^SMOKE-'
+  与 tests/test.js 的区别：这里 offsetHeight / scrollTop clamp / ResizeObserver
+  全部是浏览器真实实现，DOM mock 不参与。
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>browser smoke</title>
+<style>html,body{margin:0} #vp{height:600px;overflow-y:auto;width:800px}</style>
+</head>
+<body>
+<div id="vp"></div><pre id="out"></pre>
+<script src="../js/virtual-list.js"></script>
+<script>
+(function () {
+  'use strict';
+  var results = [];
+  function check(name, cond) { results.push('SMOKE-' + (cond ? 'PASS ' : 'FAIL ') + name); }
+
+  var N = 3000;
+  function h(i) { return 50 + ((i * 1103515245 + 12345) >>> 0) % 260; } // 50..309
+  var vp = document.getElementById('vp');
+  var list = new VirtualList(vp, {
+    itemCount: N, estimatedHeight: 90, overscan: 6,
+    renderItem: function (i, el) {
+      el.style.height = h(i) + 'px';
+      el.textContent = 'ITEM ' + i;
+    }
+  });
+
+  check('首屏节点数远小于数据量 (' + list.active.size + ')', list.active.size < 40);
+  check('首屏后已有条目被真实测量 (' + list.measuredCount + ')', list.measuredCount > 0);
+
+  function forceBottom() {
+    for (var k = 0; k < 50; k++) {
+      vp.scrollTop = list.totalHeight + 1e9;
+      list.layout();
+      if (Math.abs(vp.scrollTop + vp.clientHeight - list.totalHeight) < 1) break;
+    }
+  }
+  forceBottom();
+  var padH = parseFloat(list.sizer.children[2].style.height);
+  check('触底后下方占位为 0 (=' + padH + ')', padH === 0);
+  var last = vp.querySelectorAll('.vl-item');
+  last = parseInt(last[last.length - 1].getAttribute('data-index'), 10);
+  check('最后一条 #' + (N - 1) + ' 已挂载 (实际 ' + last + ')', last === N - 1);
+  check('触底底边对齐', Math.abs(vp.scrollTop + vp.clientHeight - list.totalHeight) < 1);
+
+  // 来回快速跳跃：内容与 data-index 一致、顺序正确
+  [0, 0.99, 0.01, 0.5, 0.8, 0.2, 0.66].forEach(function (f) {
+    vp.scrollTop = f * list.totalHeight;
+    list.layout();
+  });
+
+  // 小步走遍全表预热：让回收池扩充到“最密集一屏”所需的峰值
+  for (var y = 0; y < list.totalHeight; y += 200) {
+    vp.scrollTop = y;
+    list.layout();
+  }
+  var cap = list.nodesCreated;
+  [0.1, 0.9, 0.33, 0.77, 0, 1].forEach(function (f) {
+    vp.scrollTop = f * list.totalHeight;
+    list.layout();
+  });
+  check('预热后二次跳跃未新建节点 (cap=' + cap + ')', list.nodesCreated === cap);
+
+  var residual = false, ordered = true, prev = -1;
+  vp.querySelectorAll('.vl-item').forEach(function (el) {
+    var i = parseInt(el.getAttribute('data-index'), 10);
+    if (el.textContent !== 'ITEM ' + i) residual = true;
+    if (i <= prev) ordered = false;
+    prev = i;
+  });
+  check('无旧内容残留', !residual);
+  check('DOM 严格升序', ordered);
+
+  // 二分查找：在真实累积表上随机对拍线性扫描
+  var bad = 0;
+  for (var t = 0; t < 2000; t++) {
+    var y = Math.random() * list.totalHeight, bi = 0;
+    for (var i = 0; i < N; i++) { if (list.offsetAt(i) <= y) bi = i; else break; }
+    if (list.indexAt(y) !== bi) bad++;
+  }
+  check('二分查找 2000 随机点全部正确 (bad=' + bad + ')', bad === 0);
+
+  document.getElementById('out').textContent = results.join('\n');
+  var fail = results.some(function (r) { return r.indexOf('FAIL') >= 0; });
+  document.title = fail ? 'SMOKE-FAIL' : 'SMOKE-PASS';
+})();
+</script>
+</body>
+</html>
